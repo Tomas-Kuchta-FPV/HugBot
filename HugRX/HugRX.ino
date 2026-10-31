@@ -9,6 +9,8 @@ const int IN2 = 1;  // Levy Vzad
 const int IN3 = 20; // Pravy Vpred
 const int IN4 = 10; // Pravy Vzad
 
+const int transmitRateMs = 20; // 50Hz
+
 typedef struct struct_message {
   int leftY;
   int rightY;
@@ -132,7 +134,7 @@ void loop() {
   }
 
   // --- FAILSAFE ---
-  if (millis() - lastRecvTime > 500) {
+  if (millis() - lastRecvTime > transmitRateMs * 4) {
     driveMotor(IN1, IN2, 0);
     driveMotor(IN3, IN4, 0);
     digitalWrite(LED_PIN, HIGH); // Vypnout LED
