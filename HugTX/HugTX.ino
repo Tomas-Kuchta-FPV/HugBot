@@ -17,6 +17,9 @@ esp_now_peer_info_t peerInfo;
 unsigned long lastTransmitTime = 0;
 const int transmitRateMs = 20; // 50Hz
 
+const int Left = 0;
+const int Right = 3;
+
 // Výchozí hodnoty (ideální stav ADC na ESP32)
 int leftMin = 0, leftCenter = 2048, leftMax = 4095;
 int rightMin = 0, rightCenter = 2048, rightMax = 4095;
@@ -92,8 +95,8 @@ void loop() {
       // Měření středu (průměr z 10 měření pro lepší přesnost)
       long sumL = 0, sumR = 0;
       for(int i = 0; i < 10; i++) {
-        sumL += analogRead(0);
-        sumR += analogRead(1);
+        sumL += analogRead(Left);
+        sumR += analogRead(Right);
         delay(10);
       }
       leftCenter = sumL / 10;
@@ -109,8 +112,8 @@ void loop() {
       
       unsigned long calibStart = millis();
       while (millis() - calibStart < 5000) { 
-        int rawL = analogRead(0);
-        int rawR = analogRead(1);
+        int rawL = analogRead(Left);
+        int rawR = analogRead(Right);
         
         if (rawL < leftMin) leftMin = rawL;
         if (rawL > leftMax) leftMax = rawL;
@@ -129,8 +132,8 @@ void loop() {
   if (millis() - lastTransmitTime >= transmitRateMs) {
     lastTransmitTime = millis();
     
-    int rawLeft = analogRead(0);  
-    int rawRight = analogRead(1); 
+    int rawLeft = analogRead(Left);  
+    int rawRight = analogRead(Right); 
 
     // Výpočet z centrované křivky
     myData.leftY = mapJoystick(rawLeft, leftMin, leftCenter, leftMax);
