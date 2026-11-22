@@ -7,7 +7,7 @@ HugBot is an RC control system for battlebots built with inexpensive ESP32 board
 ## Setup
 ### Flashing the RX
 1. Set the board to `ESP32C6 Dev Module`.
-2. Enable `ACM on boot`.
+2. Enable `USB CDC On Boot`.
 3. Upload `HugRX/HugRX.ino`.
 4. Open the serial monitor.
 5. Copy the MAC address displayed by the receiver.
@@ -18,8 +18,8 @@ HugBot is an RC control system for battlebots built with inexpensive ESP32 board
 2. Enable `ACM on boot`.
 3. Copy `HugTX/secrets.example.h` to `HugTX/secrets.h`.
 4. Replace the address in `HugTX/secrets.h` with the receiver MAC address.
-5. Upload `HugTX/HugTX.ino`.
-6. Open the serial monitor and type `calibrate` to run joystick calibration.
+5. Install the `Adafruit SSD1306` and `Adafruit GFX Library` libraries in the Arduino Library Manager before compiling the TX sketch; the display itself is optional.
+6. Upload `HugTX/HugTX.ino`.
 
 
 ## BOM

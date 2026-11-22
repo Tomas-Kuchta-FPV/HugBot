@@ -81,7 +81,6 @@ void setup() {
   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
-  analogWriteResolution(8);
 
   driveMotor(IN1, IN2, 0);
   driveMotor(IN3, IN4, 0);
