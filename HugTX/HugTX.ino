@@ -1,8 +1,6 @@
 #include <esp_now.h>
 #include <WiFi.h>
-
-// MAC ADRESA PŘIJÍMAČE
-uint8_t broadcastAddress[] = {0xB8, 0x1F, 0x3F, 0x2C, 0xBA, 0x08};
+#include "secrets.h"
 
 const int LED_PIN = 8; // Pin pro TX LED (Active-Low)
 
