@@ -7,11 +7,11 @@
 #include "TxTypes.h"
 #include "secrets.h"
 
-constexpr uint8_t LEFT_X_PIN = 0;
-constexpr uint8_t LEFT_Y_PIN = 1;
-constexpr uint8_t RIGHT_X_PIN = 3;
-constexpr uint8_t RIGHT_Y_PIN = 4;
-constexpr uint8_t BATTERY_VOLTAGE_PIN = 5;
+constexpr uint8_t STICK_1_Y_PIN = 0;
+constexpr uint8_t STICK_1_X_PIN = 1;
+constexpr uint8_t STICK_2_Y_PIN = 3;
+constexpr uint8_t STICK_2_X_PIN = 4;
+constexpr uint8_t BATTERY_VOLTAGE_PIN = 2;
 constexpr uint8_t OLED_SDA_PIN = 8;
 constexpr uint8_t OLED_SCL_PIN = 9;
 constexpr uint8_t BUTTON_1_PIN = 10;
@@ -26,7 +26,8 @@ constexpr uint32_t RIGHT_STICK_GRACE_MS = 500;
 constexpr int MENU_STICK_THRESHOLD = 450;
 constexpr int MENU_STICK_RELEASE_THRESHOLD = 250;
 constexpr uint32_t MENU_NAV_REPEAT_MS = 300;
-constexpr uint32_t VALUE_ADJUST_REPEAT_MS = 120;
+constexpr uint32_t VALUE_ADJUST_SLOW_REPEAT_MS = 300;
+constexpr uint32_t VALUE_ADJUST_FAST_REPEAT_MS = 40;
 constexpr uint32_t PACKET_MAGIC = 0x48554742;
 constexpr uint32_t TRANSMIT_INTERVAL_MS = 20;
 constexpr uint32_t CALIBRATION_MAGIC = 0x43414C42;
@@ -38,7 +39,10 @@ constexpr int SCREEN_HEIGHT = 64;
 constexpr float DEFAULT_BATTERY_VOLTAGE_MULTIPLIER = 2.0f;
 constexpr float BATTERY_MULTIPLIER_MIN = 1.0f;
 constexpr float BATTERY_MULTIPLIER_MAX = 10.0f;
-constexpr float BATTERY_MULTIPLIER_STEP = 0.1f;
+constexpr float BATTERY_MULTIPLIER_STEP = 0.01f;
+constexpr uint8_t SETTINGS_ITEM_COUNT = 6;
+constexpr uint8_t PRECODED_MODEL_COUNT = sizeof(modelList) / sizeof(modelList[0]);
+static_assert(PRECODED_MODEL_COUNT > 0, "At least one model must be configured");
 
 typedef struct __attribute__((packed)) {
   uint32_t magic;
@@ -50,7 +54,6 @@ typedef struct __attribute__((packed)) {
 static_assert(sizeof(ControlPacket) == 12, "ControlPacket must remain 12 bytes");
 
 ControlPacket myData{};
-esp_now_peer_info_t peerInfo;
 Preferences calibrationPreferences;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
@@ -62,6 +65,7 @@ uint32_t lastBatteryReadTime = 0;
 uint32_t lastMenuNavigationTime = 0;
 uint32_t lastValueAdjustTime = 0;
 uint32_t rightStickGraceUntil = 0;
+uint32_t controlGraceUntil = 0;
 volatile uint32_t lastSendStatusTime = 0;
 volatile bool sendStatusKnown = false;
 volatile bool lastSendSucceeded = false;
@@ -75,7 +79,10 @@ bool calibrationStorageReady = false;
 bool displayReady = false;
 float batteryVoltageMultiplier = DEFAULT_BATTERY_VOLTAGE_MULTIPLIER;
 float editedBatteryVoltageMultiplier = DEFAULT_BATTERY_VOLTAGE_MULTIPLIER;
+float batterySenseVoltage = 0.0f;
 float batteryVoltage = 0.0f;
+uint8_t activeModelSelection = 0;
+uint8_t editedModelSelection = 0;
 
 void OnDataSent(const esp_now_send_info_t *txInfo, esp_now_send_status_t status) {
   (void)txInfo;
@@ -89,13 +96,12 @@ bool hasRecentAcknowledgement() {
          millis() - lastSendStatusTime <= FAILSAFE_TIMEOUT_MS;
 }
 
-bool isBroadcastPeer() {
-  for (uint8_t i = 0; i < 6; ++i) {
-    if (broadcastAddress[i] != 0xFF) {
-      return false;
-    }
-  }
-  return true;
+const uint8_t *getModelAddress(uint8_t index) {
+  return modelList[index].mac;
+}
+
+const char *getModelName(uint8_t index) {
+  return modelList[index].friendlyName;
 }
 
 struct AxisCalibration {
@@ -105,10 +111,10 @@ struct AxisCalibration {
   int max;
 };
 
-AxisCalibration leftXCalibration{LEFT_X_PIN, 0, 2048, 4095};
-AxisCalibration leftYCalibration{LEFT_Y_PIN, 0, 2048, 4095};
-AxisCalibration rightXCalibration{RIGHT_X_PIN, 0, 2048, 4095};
-AxisCalibration rightYCalibration{RIGHT_Y_PIN, 0, 2048, 4095};
+AxisCalibration leftYCalibration{STICK_1_Y_PIN, 0, 2048, 4095};
+AxisCalibration leftXCalibration{STICK_1_X_PIN, 0, 2048, 4095};
+AxisCalibration rightYCalibration{STICK_2_Y_PIN, 0, 2048, 4095};
+AxisCalibration rightXCalibration{STICK_2_X_PIN, 0, 2048, 4095};
 
 ButtonState button1{BUTTON_1_PIN};
 ButtonState button2{BUTTON_2_PIN};
@@ -118,6 +124,7 @@ enum class ScreenMode {
   SETTINGS,
   BATTERY_MULTIPLIER,
   CONTROL_MODE,
+  MODEL_SELECTION,
   ERASE_CONFIRM
 };
 
@@ -137,10 +144,10 @@ bool isAxisCalibrationValid(int minValue, int centerValue, int maxValue) {
 }
 
 bool isCalibrationValid(const CalibrationRecord &record) {
-  return isAxisCalibrationValid(record.leftXMin, record.leftXCenter, record.leftXMax) &&
-         isAxisCalibrationValid(record.leftYMin, record.leftYCenter, record.leftYMax) &&
-         isAxisCalibrationValid(record.rightXMin, record.rightXCenter, record.rightXMax) &&
-         isAxisCalibrationValid(record.rightYMin, record.rightYCenter, record.rightYMax);
+  return isAxisCalibrationValid(record.leftYMin, record.leftYCenter, record.leftYMax) &&
+         isAxisCalibrationValid(record.leftXMin, record.leftXCenter, record.leftXMax) &&
+         isAxisCalibrationValid(record.rightYMin, record.rightYCenter, record.rightYMax) &&
+         isAxisCalibrationValid(record.rightXMin, record.rightXCenter, record.rightXMax);
 }
 
 CalibrationRecord currentCalibration() {
@@ -148,25 +155,25 @@ CalibrationRecord currentCalibration() {
       CALIBRATION_MAGIC,
       CALIBRATION_VERSION,
       0,
-      leftXCalibration.min, leftXCalibration.center, leftXCalibration.max,
       leftYCalibration.min, leftYCalibration.center, leftYCalibration.max,
-      rightXCalibration.min, rightXCalibration.center, rightXCalibration.max,
-      rightYCalibration.min, rightYCalibration.center, rightYCalibration.max};
+      leftXCalibration.min, leftXCalibration.center, leftXCalibration.max,
+      rightYCalibration.min, rightYCalibration.center, rightYCalibration.max,
+      rightXCalibration.min, rightXCalibration.center, rightXCalibration.max};
 }
 
 void applyCalibration(const CalibrationRecord &record) {
-  leftXCalibration.min = record.leftXMin;
-  leftXCalibration.center = record.leftXCenter;
-  leftXCalibration.max = record.leftXMax;
   leftYCalibration.min = record.leftYMin;
   leftYCalibration.center = record.leftYCenter;
   leftYCalibration.max = record.leftYMax;
-  rightXCalibration.min = record.rightXMin;
-  rightXCalibration.center = record.rightXCenter;
-  rightXCalibration.max = record.rightXMax;
+  leftXCalibration.min = record.leftXMin;
+  leftXCalibration.center = record.leftXCenter;
+  leftXCalibration.max = record.leftXMax;
   rightYCalibration.min = record.rightYMin;
   rightYCalibration.center = record.rightYCenter;
   rightYCalibration.max = record.rightYMax;
+  rightXCalibration.min = record.rightXMin;
+  rightXCalibration.center = record.rightXCenter;
+  rightXCalibration.max = record.rightXMax;
 }
 
 void loadBatteryMultiplier() {
@@ -214,19 +221,101 @@ bool saveControlMode(ControlMode mode) {
   return calibrationPreferences.putUChar("driveMode", static_cast<uint8_t>(mode)) == sizeof(uint8_t);
 }
 
-bool eraseSavedSettings() {
-  if (!calibrationStorageReady || !calibrationPreferences.clear()) {
+void loadModelSelection() {
+  if (!calibrationStorageReady) {
+    return;
+  }
+
+  const uint8_t savedSelection = calibrationPreferences.getUChar("modelIdx", 0);
+  if (savedSelection >= PRECODED_MODEL_COUNT) {
+    Serial.println("Saved model selection is invalid; using the first model.");
+    return;
+  }
+  activeModelSelection = savedSelection;
+}
+
+bool addEspNowPeer(const uint8_t *address) {
+  esp_now_peer_info_t peer{};
+  memcpy(peer.peer_addr, address, 6);
+  peer.channel = 1;
+  peer.encrypt = false;
+  return esp_now_add_peer(&peer) == ESP_OK;
+}
+
+bool saveModelSelection(uint8_t selection) {
+  if (!calibrationStorageReady ||
+      selection >= PRECODED_MODEL_COUNT) {
+    return false;
+  }
+  return calibrationPreferences.putUChar("modelIdx", selection) == sizeof(uint8_t);
+}
+
+bool selectModel(uint8_t selection) {
+  if (selection >= PRECODED_MODEL_COUNT) {
     return false;
   }
 
-  leftXCalibration = {LEFT_X_PIN, 0, 2048, 4095};
-  leftYCalibration = {LEFT_Y_PIN, 0, 2048, 4095};
-  rightXCalibration = {RIGHT_X_PIN, 0, 2048, 4095};
-  rightYCalibration = {RIGHT_Y_PIN, 0, 2048, 4095};
+  const uint8_t *oldAddress = getModelAddress(activeModelSelection);
+  const uint8_t *newAddress = getModelAddress(selection);
+  const bool addressChanged = memcmp(oldAddress, newAddress, 6) != 0;
+  const bool peerAlreadyExists = esp_now_is_peer_exist(newAddress);
+  if (addressChanged && !peerAlreadyExists &&
+      !addEspNowPeer(newAddress)) {
+    Serial.println("Failed to add selected model as an ESP-NOW peer.");
+    return false;
+  }
+
+  if (!saveModelSelection(selection)) {
+    if (addressChanged && !peerAlreadyExists) {
+      esp_now_del_peer(newAddress);
+    }
+    Serial.println("Failed to save model selection; selection not applied.");
+    return false;
+  }
+
+  if (addressChanged && esp_now_is_peer_exist(oldAddress) &&
+      esp_now_del_peer(oldAddress) != ESP_OK) {
+    Serial.println("Could not remove the previous ESP-NOW peer.");
+  }
+  activeModelSelection = selection;
+  return true;
+}
+
+bool eraseSavedSettings() {
+  if (!calibrationStorageReady) {
+    return false;
+  }
+
+  const uint8_t *oldAddress = getModelAddress(activeModelSelection);
+  const uint8_t *defaultAddress = getModelAddress(0);
+  const bool addressChanged = memcmp(oldAddress, defaultAddress, 6) != 0;
+  const bool defaultPeerAlreadyExists = esp_now_is_peer_exist(defaultAddress);
+  if (addressChanged && !defaultPeerAlreadyExists &&
+      !addEspNowPeer(defaultAddress)) {
+    Serial.println("Failed to restore the default ESP-NOW peer.");
+    return false;
+  }
+  if (!calibrationPreferences.clear()) {
+    if (addressChanged && !defaultPeerAlreadyExists) {
+      esp_now_del_peer(defaultAddress);
+    }
+    return false;
+  }
+  if (addressChanged && esp_now_is_peer_exist(oldAddress) &&
+      esp_now_del_peer(oldAddress) != ESP_OK) {
+    Serial.println("Could not remove the previous ESP-NOW peer.");
+  }
+
+  leftYCalibration = {STICK_1_Y_PIN, 0, 2048, 4095};
+  leftXCalibration = {STICK_1_X_PIN, 0, 2048, 4095};
+  rightYCalibration = {STICK_2_Y_PIN, 0, 2048, 4095};
+  rightXCalibration = {STICK_2_X_PIN, 0, 2048, 4095};
   batteryVoltageMultiplier = DEFAULT_BATTERY_VOLTAGE_MULTIPLIER;
   editedBatteryVoltageMultiplier = batteryVoltageMultiplier;
   controlMode = ControlMode::TANK;
   editedControlMode = controlMode;
+  activeModelSelection = 0;
+  editedModelSelection = 0;
   updateBatteryVoltage();
   return true;
 }
@@ -306,13 +395,13 @@ void drawHeader() {
   display.setCursor(0, 0);
   display.print("TX");
   display.setCursor(22, 0);
-  if (isBroadcastPeer()) {
-    display.print("BROADCAST");
-  } else {
-    display.print(hasRecentAcknowledgement() ? "ACK" : "FAILSAFE");
-  }
+  display.print(hasRecentAcknowledgement() ? "ACK" : "FAILSAFE");
   display.setCursor(88, 0);
-  display.print(batteryVoltage, 2);
+  const float displayedBatteryVoltage =
+      screenMode == ScreenMode::BATTERY_MULTIPLIER
+          ? batterySenseVoltage * editedBatteryVoltageMultiplier
+          : batteryVoltage;
+  display.print(displayedBatteryVoltage, 2);
   display.print('V');
 }
 
@@ -327,25 +416,27 @@ void updateDisplay() {
   drawHeader();
 
   if (screenMode == ScreenMode::HOME) {
-    drawJoystick(32, 37, "L", leftYValue, leftXValue);
-    drawJoystick(96, 37, "R", rightYValue, rightXValue);
+    drawJoystick(32, 37, "L", leftXValue, leftYValue);
+    drawJoystick(96, 37, "R", rightXValue, rightYValue);
     drawButtonBadge(35, 56, "B1", button1.pressed);
     drawButtonBadge(73, 56, "B2", button2.pressed);
   } else if (screenMode == ScreenMode::SETTINGS) {
-    display.setCursor(0, 14);
+    display.setCursor(0, 8);
     display.print("Settings");
     const char *items[] = {
-        "Calibrate sticks", "Battery factor", "Control mode", "Back", "Erase settings"};
-    for (uint8_t i = 0; i < 5; ++i) {
-      display.setCursor(0, 19 + i * 8);
+        "Model select", "Control mode", "Calibrate sticks",
+        "Battery factor", "Erase settings", "Back"};
+    for (uint8_t i = 0; i < SETTINGS_ITEM_COUNT; ++i) {
+      display.setCursor(0, 16 + i * 8);
       display.print(i == settingsSelection ? '>' : ' ');
       display.print(items[i]);
     }
   } else if (screenMode == ScreenMode::BATTERY_MULTIPLIER) {
     display.setCursor(0, 17);
-    display.print("Battery multiplier");
-    display.setCursor(25, 30);
-    display.print(editedBatteryVoltageMultiplier, 1);
+    display.print("Battery factor");
+    display.setCursor(35, 29);
+    display.print(editedBatteryVoltageMultiplier, 2);
+    display.print('x');
   } else if (screenMode == ScreenMode::CONTROL_MODE) {
     display.setCursor(0, 14);
     display.print("Control mode");
@@ -353,6 +444,18 @@ void updateDisplay() {
     display.print(editedControlMode == ControlMode::TANK ? "> Tank" : "  Tank");
     display.setCursor(0, 38);
     display.print(editedControlMode == ControlMode::MIXED ? "> Mixed" : "  Mixed");
+  } else if (screenMode == ScreenMode::MODEL_SELECTION) {
+    display.setCursor(0, 14);
+    display.print("Select model");
+    display.setCursor(0, 29);
+    const char *modelName = getModelName(editedModelSelection);
+    for (uint8_t i = 0; modelName[i] != '\0' && i < 21; ++i) {
+      display.print(modelName[i]);
+    }
+    display.setCursor(0, 44);
+    display.print(editedModelSelection + 1);
+    display.print('/');
+    display.print(PRECODED_MODEL_COUNT);
   } else {
     display.setCursor(0, 14);
     display.print("Erase all settings?");
@@ -382,7 +485,8 @@ void updateBatteryVoltage() {
   for (uint8_t i = 0; i < 4; ++i) {
     totalMillivolts += analogReadMilliVolts(BATTERY_VOLTAGE_PIN);
   }
-  batteryVoltage = (totalMillivolts / 4.0f) * batteryVoltageMultiplier / 1000.0f;
+  batterySenseVoltage = (totalMillivolts / 4.0f) / 1000.0f;
+  batteryVoltage = batterySenseVoltage * batteryVoltageMultiplier;
 }
 
 void updateButton(ButtonState &button) {
@@ -400,6 +504,15 @@ void updateButton(ButtonState &button) {
 }
 
 void runCalibration();
+
+int getMenuDirection(int horizontal, int vertical) {
+  if (abs(horizontal) > abs(vertical)) {
+    return horizontal > MENU_STICK_THRESHOLD ? -1 :
+           horizontal < -MENU_STICK_THRESHOLD ? 1 : 0;
+  }
+  return vertical > MENU_STICK_THRESHOLD ? -1 :
+         vertical < -MENU_STICK_THRESHOLD ? 1 : 0;
+}
 
 void serviceButtons() {
   updateButton(button1);
@@ -422,6 +535,7 @@ void serviceButtons() {
       rightStickActionReady = true;
     } else if (screenMode == ScreenMode::SETTINGS) {
       screenMode = ScreenMode::HOME;
+      controlGraceUntil = millis() + RIGHT_STICK_GRACE_MS;
     }
   }
 
@@ -433,18 +547,20 @@ void serviceJoystickMenu() {
     return;
   }
 
-  const int leftVertical = leftXValue;
+  const int leftHorizontal = leftXValue;
   const int navigationDirection =
-      leftVertical > MENU_STICK_THRESHOLD ? -1 :
-      leftVertical < -MENU_STICK_THRESHOLD ? 1 : 0;
-  if (abs(leftVertical) < MENU_STICK_RELEASE_THRESHOLD) {
+      getMenuDirection(leftHorizontal, leftYValue);
+  if (abs(leftHorizontal) < MENU_STICK_RELEASE_THRESHOLD &&
+      abs(leftYValue) < MENU_STICK_RELEASE_THRESHOLD) {
     menuNavigationDirection = 0;
   }
 
   if (screenMode == ScreenMode::SETTINGS && navigationDirection != 0 &&
       (navigationDirection != menuNavigationDirection ||
        millis() - lastMenuNavigationTime >= MENU_NAV_REPEAT_MS)) {
-    settingsSelection = (settingsSelection + 5 + navigationDirection) % 5;
+    settingsSelection =
+        (settingsSelection + SETTINGS_ITEM_COUNT + navigationDirection) %
+        SETTINGS_ITEM_COUNT;
     menuNavigationDirection = navigationDirection;
     lastMenuNavigationTime = millis();
   } else if (screenMode == ScreenMode::CONTROL_MODE && navigationDirection != 0 &&
@@ -455,9 +571,19 @@ void serviceJoystickMenu() {
         : ControlMode::MIXED;
     menuNavigationDirection = navigationDirection;
     lastMenuNavigationTime = millis();
+  } else if (screenMode == ScreenMode::MODEL_SELECTION &&
+             navigationDirection != 0 &&
+             (navigationDirection != menuNavigationDirection ||
+              millis() - lastMenuNavigationTime >= MENU_NAV_REPEAT_MS)) {
+    editedModelSelection = static_cast<uint8_t>(
+        (editedModelSelection + PRECODED_MODEL_COUNT +
+         navigationDirection) %
+        PRECODED_MODEL_COUNT);
+    menuNavigationDirection = navigationDirection;
+    lastMenuNavigationTime = millis();
   }
 
-  const int rightHorizontal = rightYValue;
+  const int rightHorizontal = rightXValue;
   if (abs(rightHorizontal) < MENU_STICK_RELEASE_THRESHOLD &&
       (screenMode != ScreenMode::SETTINGS ||
        static_cast<int32_t>(millis() - rightStickGraceUntil) >= 0)) {
@@ -468,22 +594,27 @@ void serviceJoystickMenu() {
     if (rightStickActionReady && rightHorizontal > MENU_STICK_THRESHOLD) {
       rightStickActionReady = false;
       if (settingsSelection == 0) {
-        runCalibration();
+        screenMode = ScreenMode::MODEL_SELECTION;
+        editedModelSelection = activeModelSelection;
+        rightStickActionReady = false;
       } else if (settingsSelection == 1) {
+        screenMode = ScreenMode::CONTROL_MODE;
+        editedControlMode = controlMode;
+        rightStickActionReady = false;
+      } else if (settingsSelection == 2) {
+        runCalibration();
+      } else if (settingsSelection == 3) {
         screenMode = ScreenMode::BATTERY_MULTIPLIER;
         editedBatteryVoltageMultiplier = batteryVoltageMultiplier;
         lastValueAdjustTime = millis();
         valueAdjustDirection = 0;
         rightStickActionReady = false;
-      } else if (settingsSelection == 2) {
-        screenMode = ScreenMode::CONTROL_MODE;
-        editedControlMode = controlMode;
-        rightStickActionReady = false;
-      } else if (settingsSelection == 3) {
-        screenMode = ScreenMode::HOME;
-      } else {
+      } else if (settingsSelection == 4) {
         screenMode = ScreenMode::ERASE_CONFIRM;
         rightStickActionReady = false;
+      } else {
+        screenMode = ScreenMode::HOME;
+        controlGraceUntil = millis() + RIGHT_STICK_GRACE_MS;
       }
     }
   } else if (screenMode == ScreenMode::BATTERY_MULTIPLIER) {
@@ -507,7 +638,7 @@ void serviceJoystickMenu() {
       rightStickActionReady = false;
     }
 
-    const int leftHorizontal = leftYValue;
+    const int leftHorizontal = leftXValue;
     if (abs(leftHorizontal) < MENU_STICK_RELEASE_THRESHOLD) {
       valueAdjustDirection = 0;
     } else if (abs(leftHorizontal) > MENU_STICK_THRESHOLD &&
@@ -515,10 +646,20 @@ void serviceJoystickMenu() {
                 (leftHorizontal < 0 && valueAdjustDirection > -1))) {
       valueAdjustDirection = leftHorizontal > 0 ? 1 : -1;
     }
+    const int stickMagnitude =
+        constrain(abs(leftHorizontal), MENU_STICK_THRESHOLD, 1000);
+    const float pushStrength =
+        (stickMagnitude - MENU_STICK_THRESHOLD) /
+        static_cast<float>(1000 - MENU_STICK_THRESHOLD);
+    const uint32_t repeatIntervalMs = VALUE_ADJUST_SLOW_REPEAT_MS -
+        static_cast<uint32_t>(
+            (VALUE_ADJUST_SLOW_REPEAT_MS - VALUE_ADJUST_FAST_REPEAT_MS) *
+            pushStrength * pushStrength);
     if (valueAdjustDirection != 0 &&
-        millis() - lastValueAdjustTime >= VALUE_ADJUST_REPEAT_MS) {
+        millis() - lastValueAdjustTime >= repeatIntervalMs) {
       editedBatteryVoltageMultiplier = constrain(
-          editedBatteryVoltageMultiplier + valueAdjustDirection * BATTERY_MULTIPLIER_STEP,
+          editedBatteryVoltageMultiplier +
+              valueAdjustDirection * BATTERY_MULTIPLIER_STEP,
           BATTERY_MULTIPLIER_MIN,
           BATTERY_MULTIPLIER_MAX);
       lastValueAdjustTime = millis();
@@ -537,6 +678,22 @@ void serviceJoystickMenu() {
     } else if (rightStickActionReady &&
                rightHorizontal < -MENU_STICK_THRESHOLD) {
       editedControlMode = controlMode;
+      screenMode = ScreenMode::SETTINGS;
+      rightStickGraceUntil = millis() + RIGHT_STICK_GRACE_MS;
+      rightStickActionReady = false;
+    }
+
+  } else if (screenMode == ScreenMode::MODEL_SELECTION) {
+    if (rightStickActionReady &&
+        rightHorizontal > MENU_STICK_THRESHOLD) {
+      if (selectModel(editedModelSelection)) {
+        screenMode = ScreenMode::SETTINGS;
+        rightStickGraceUntil = millis() + RIGHT_STICK_GRACE_MS;
+      }
+      rightStickActionReady = false;
+    } else if (rightStickActionReady &&
+               rightHorizontal < -MENU_STICK_THRESHOLD) {
+      editedModelSelection = activeModelSelection;
       screenMode = ScreenMode::SETTINGS;
       rightStickGraceUntil = millis() + RIGHT_STICK_GRACE_MS;
       rightStickActionReady = false;
@@ -578,8 +735,8 @@ void runCalibration() {
   calibrationInProgress = true;
   const CalibrationRecord previousCalibration = currentCalibration();
   AxisCalibration *axes[] = {
-      &leftXCalibration, &leftYCalibration, &rightXCalibration, &rightYCalibration};
-  const char *axisNames[] = {"Left X", "Left Y", "Right X", "Right Y"};
+      &leftYCalibration, &leftXCalibration, &rightYCalibration, &rightXCalibration};
+  const char *axisNames[] = {"Left Y", "Left X", "Right Y", "Right X"};
 
   Serial.println("\n--- CALIBRATION STARTED ---");
   Serial.println("Release both sticks; measuring centers for 2 seconds.");
@@ -660,6 +817,7 @@ void setup() {
   }
   loadBatteryMultiplier();
   loadControlMode();
+  loadModelSelection();
   updateBatteryVoltage();
 
   WiFi.mode(WIFI_STA);
@@ -675,12 +833,7 @@ void setup() {
     return;
   }
 
-  memset(&peerInfo, 0, sizeof(peerInfo));
-  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
-  peerInfo.channel = 1;
-  peerInfo.encrypt = false;
-
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+  if (!addEspNowPeer(getModelAddress(activeModelSelection))) {
     Serial.println("Failed to add ESP-NOW peer");
     return;
   }
@@ -691,7 +844,7 @@ void setup() {
   Serial.println("        TX BATTLEBOT CONTROLLER");
   Serial.println("=========================================");
   Serial.println("Hold both buttons for 1 second to open settings.");
-  Serial.printf("Battery voltage multiplier: %.1f\n", batteryVoltageMultiplier);
+  Serial.printf("Battery voltage multiplier: %.2f\n", batteryVoltageMultiplier);
   Serial.println("-----------------------------------------");
   Serial.println("To calibrate, type 'calibrate' and press Enter.");
   Serial.println("=========================================\n");
@@ -727,34 +880,37 @@ void loop() {
   if (millis() - lastTransmitTime >= TRANSMIT_INTERVAL_MS) {
     lastTransmitTime = millis();
 
-    leftXValue = mapJoystick(
-        analogRead(leftXCalibration.pin),
-        leftXCalibration.min, leftXCalibration.center, leftXCalibration.max);
     leftYValue = mapJoystick(
         analogRead(leftYCalibration.pin),
         leftYCalibration.min, leftYCalibration.center, leftYCalibration.max);
-    rightXValue = mapJoystick(
-        analogRead(rightXCalibration.pin),
-        rightXCalibration.min, rightXCalibration.center, rightXCalibration.max);
+    leftXValue = mapJoystick(
+        analogRead(leftXCalibration.pin),
+        leftXCalibration.min, leftXCalibration.center, leftXCalibration.max);
     rightYValue = mapJoystick(
         analogRead(rightYCalibration.pin),
         rightYCalibration.min, rightYCalibration.center, rightYCalibration.max);
+    rightXValue = mapJoystick(
+        analogRead(rightXCalibration.pin),
+        rightXCalibration.min, rightXCalibration.center, rightXCalibration.max);
 
     serviceJoystickMenu();
 
     myData.magic = PACKET_MAGIC;
     myData.sequence = ++packetSequence;
-    if (screenMode != ScreenMode::HOME) {
+    if (screenMode != ScreenMode::HOME ||
+        static_cast<int32_t>(millis() - controlGraceUntil) < 0) {
       myData.leftY = 0;
       myData.rightY = 0;
     } else if (controlMode == ControlMode::TANK) {
-      myData.leftY = static_cast<int16_t>(leftXValue);
-      myData.rightY = static_cast<int16_t>(rightXValue);
+      myData.leftY = static_cast<int16_t>(leftYValue);
+      myData.rightY = static_cast<int16_t>(rightYValue);
     } else {
-      setControlOutputs(leftXValue, rightYValue);
+      setControlOutputs(leftYValue, rightXValue);
     }
 
-    if (esp_now_send(broadcastAddress, reinterpret_cast<const uint8_t *>(&myData), sizeof(myData)) != ESP_OK) {
+    if (esp_now_send(getModelAddress(activeModelSelection),
+                     reinterpret_cast<const uint8_t *>(&myData),
+                     sizeof(myData)) != ESP_OK) {
       lastSendSucceeded = false;
       lastSendStatusTime = millis();
       sendStatusKnown = true;

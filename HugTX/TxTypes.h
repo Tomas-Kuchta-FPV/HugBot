@@ -7,6 +7,11 @@ enum class ControlMode : uint8_t {
   MIXED
 };
 
+struct TxModel {
+  const char *friendlyName;
+  uint8_t mac[6];
+};
+
 struct ButtonState {
   uint8_t pin;
   bool rawPressed = false;
@@ -19,8 +24,8 @@ struct CalibrationRecord {
   uint32_t magic;
   uint16_t version;
   uint16_t reserved;
-  int32_t leftXMin, leftXCenter, leftXMax;
   int32_t leftYMin, leftYCenter, leftYMax;
-  int32_t rightXMin, rightXCenter, rightXMax;
+  int32_t leftXMin, leftXCenter, leftXMax;
   int32_t rightYMin, rightYCenter, rightYMax;
+  int32_t rightXMin, rightXCenter, rightXMax;
 };
