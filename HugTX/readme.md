@@ -22,3 +22,13 @@ This is the transmitter side of the HugBot controller.
 | **GPIO10**  | Button 1                        | Digital (`INPUT_PULLUP`) |
 | **GPIO20**  | *Unconnected*                   | *N/A*                    |
 | **GPIO21**  | Button 2                        | Digital (`INPUT_PULLUP`) |
+
+Hold both buttons for one second to open settings. Select **Control mode** to
+choose Tank (left/right sticks control the respective motors) or Mixed (left
+stick vertical controls throttle, right stick horizontal controls steering).
+Move the left stick up/down to choose; move the right stick right to save or
+left to discard. The selected mode and battery voltage multiplier are saved in
+ESP32 non-volatile Preferences storage. Motor outputs are held at zero while
+the settings screens are open. The final **Erase settings** item clears saved
+joystick calibration, control mode, and voltage multiplier after confirmation,
+restoring their defaults.
